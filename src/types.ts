@@ -1,15 +1,16 @@
 export interface MarkerImage {
-  id: string;
+  id: number;
+  marker_id: number;
   uri: string;
-  name?: string;
+  created_at: string;
 }
 
-export interface MapMarker {
-  id: string;
+export interface Marker {
+  id: number;
   name: string;
   latitude: number;
   longitude: number;
-  images: MarkerImage[];
+  created_at: string;
 }
 
 export interface MarkerRouteParams {

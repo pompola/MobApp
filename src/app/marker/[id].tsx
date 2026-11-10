@@ -1,30 +1,79 @@
-
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    Image,
-    Pressable,
-    ScrollView,
-    TextInput,
-    StyleSheet,
-    Text,
-    View,
+  ActivityIndicator,
+  Alert,
+  Image,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
-import { useMarkers } from '../../context/MarkersContext';
+import { useDatabase } from '../../context/DatabaseContext';
+import { DatabaseError } from '../../database/errors';
+import type { Marker, MarkerImage } from '../../types';
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof DatabaseError && error.code === 'VALIDATION'
+    ? error.message
+    : fallback;
+}
 
 export default function MarkerDetailsScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { markers, addImage, removeImage, renameMarker, removeMarker } = useMarkers();
+  const markerId = Number(id);
+  const {
+    getMarker,
+    getMarkerImages,
+    addImages,
+    deleteImage,
+    renameMarker,
+    deleteMarker,
+    revision,
+  } = useDatabase();
+
+  const [marker, setMarker] = useState<Marker | null>(null);
+  const [images, setImages] = useState<MarkerImage[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [loading, setLoading] = useState(false);
-  const marker = markers.find((item) => item.id === id);
   const [placeName, setPlaceName] = useState('');
 
+  // Загрузка места и его изображений из БД (повторно — после каждого изменения данных).
   useEffect(() => {
-    if (marker) setPlaceName(marker.name);
-  }, [marker?.id, marker?.name]);
+    if (!Number.isInteger(markerId)) {
+      setInitialLoading(false);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([getMarker(markerId), getMarkerImages(markerId)])
+      .then(([foundMarker, foundImages]) => {
+        if (cancelled) return;
+        setMarker(foundMarker);
+        setImages(foundImages);
+        if (foundMarker) setPlaceName((current) => current || foundMarker.name);
+      })
+      .catch((error) => {
+        console.error('Не удалось загрузить данные места:', error);
+        if (!cancelled) Alert.alert('Ошибка базы данных', 'Не удалось загрузить данные места.');
+      })
+      .finally(() => {
+        if (!cancelled) setInitialLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [markerId, getMarker, getMarkerImages, revision]);
+
+  if (initialLoading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#2563eb" />
+      </View>
+    );
+  }
 
   if (!marker) {
     return (
@@ -60,26 +109,49 @@ export default function MarkerDetailsScreen() {
         return;
       }
 
-      for (const asset of result.assets) {
-        addImage(marker.id, {
-          id: `${Date.now()}-${Math.random()
-            .toString(36)
-            .slice(2, 8)}`,
-          uri: asset.uri,
-          name: asset.fileName ?? undefined,
-        });
-      }
-    } catch {
+      // Все выбранные фото сохраняются одной транзакцией: либо все, либо ни одного.
+      await addImages(marker.id, result.assets.map((asset) => asset.uri));
+    } catch (error) {
       Alert.alert(
         'Ошибка',
-        'Не удалось выбрать изображения. Попробуй ещё раз.'
+        errorMessage(error, 'Не удалось добавить изображения. Попробуй ещё раз.')
       );
     } finally {
       setLoading(false);
     }
   };
 
-  const confirmRemove = (imageId: string) => {
+  const saveName = async () => {
+    if (!placeName.trim()) {
+      Alert.alert('Введите название', 'Название места не должно быть пустым.');
+      return;
+    }
+    try {
+      await renameMarker(marker.id, placeName);
+      Alert.alert('Сохранено', 'Название места обновлено.');
+    } catch (error) {
+      Alert.alert('Ошибка', errorMessage(error, 'Не удалось сохранить название.'));
+    }
+  };
+
+  const removePlace = async () => {
+    try {
+      await deleteMarker(marker.id);
+      router.replace('/');
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось удалить место. Попробуй ещё раз.');
+    }
+  };
+
+  const removeImage = async (imageId: number) => {
+    try {
+      await deleteImage(imageId);
+    } catch {
+      Alert.alert('Ошибка', 'Не удалось удалить изображение.');
+    }
+  };
+
+  const confirmRemove = (imageId: number) => {
     Alert.alert(
       'Удалить изображение?',
       'Оно будет удалено из списка этого места.',
@@ -88,7 +160,7 @@ export default function MarkerDetailsScreen() {
         {
           text: 'Удалить',
           style: 'destructive',
-          onPress: () => removeImage(marker.id, imageId),
+          onPress: () => removeImage(imageId),
         },
       ]
     );
@@ -107,17 +179,7 @@ export default function MarkerDetailsScreen() {
           maxLength={60}
           style={styles.nameInput}
         />
-        <Pressable
-          style={styles.saveButton}
-          onPress={() => {
-            if (!placeName.trim()) {
-              Alert.alert('Введите название', 'Название места не должно быть пустым.');
-              return;
-            }
-            renameMarker(marker.id, placeName);
-            Alert.alert('Сохранено', 'Название места обновлено.');
-          }}
-        >
+        <Pressable style={styles.saveButton} onPress={saveName}>
           <Text style={styles.addButtonText}>Сохранить название</Text>
         </Pressable>
         <Text style={styles.label}>Широта</Text>
@@ -138,14 +200,14 @@ export default function MarkerDetailsScreen() {
           `«${marker.name}» и все связанные с ним фотографии будут удалены.`,
           [
             { text: 'Отмена', style: 'cancel' },
-            { text: 'Удалить место', style: 'destructive', onPress: () => { removeMarker(marker.id); router.replace('/'); } },
+            { text: 'Удалить место', style: 'destructive', onPress: removePlace },
           ]
         )}
       >
         <Text style={styles.removePlaceText}>Удалить место с карты</Text>
       </Pressable>
 
-      <Text style={styles.sectionTitle}>Фотографии ({marker.images.length})</Text>
+      <Text style={styles.sectionTitle}>Фотографии ({images.length})</Text>
 
       <Pressable
         style={styles.addButton}
@@ -161,13 +223,13 @@ export default function MarkerDetailsScreen() {
         )}
       </Pressable>
 
-      {marker.images.length === 0 ? (
+      {images.length === 0 ? (
         <Text style={styles.empty}>
           Пока нет фотографий. Добавь первую!
         </Text>
       ) : (
         <View style={styles.gallery}>
-          {marker.images.map((image) => (
+          {images.map((image) => (
             <View key={image.id} style={styles.imageCard}>
               <Image
                 source={{ uri: image.uri }}

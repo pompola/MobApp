@@ -3,7 +3,9 @@ import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
-import { useMarkers } from '../context/MarkersContext';
+import { useDatabase } from '../context/DatabaseContext';
+import type { Marker } from '../types';
+
 
 const INITIAL_LATITUDE = 58.010455;
 const INITIAL_LONGITUDE = 56.229443;
@@ -121,10 +123,29 @@ const html = `
 `;
 
 export default function MapScreen() {
-  const { markers, addMarker } = useMarkers();
+  const { getMarkers, addMarker, revision } = useDatabase();
   const webViewRef = useRef<WebView>(null);
+  const [markers, setMarkers] = useState<Marker[]>([]);
   const [webReady, setWebReady] = useState(false);
   const [mapError, setMapError] = useState(false);
+
+  // Загружаем маркеры из БД при открытии экрана и после любых изменений данных.
+  useEffect(() => {
+    let cancelled = false;
+    getMarkers()
+      .then((rows) => {
+        if (!cancelled) setMarkers(rows);
+      })
+      .catch((error) => {
+        console.error('Не удалось загрузить маркеры:', error);
+        if (!cancelled) {
+          Alert.alert('Ошибка базы данных', 'Не удалось загрузить сохранённые места.');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [getMarkers, revision]);
 
   useEffect(() => {
     if (!webReady) return;
@@ -144,7 +165,7 @@ export default function MapScreen() {
     webViewRef.current?.injectJavaScript(script);
   }, [markers, webReady]);
 
-  const handleMessage = (event: WebViewMessageEvent) => {
+  const handleMessage = async (event: WebViewMessageEvent) => {
     try {
       const message = JSON.parse(event.nativeEvent.data);
 
@@ -153,23 +174,25 @@ export default function MapScreen() {
       }
 
       if (message.type === 'addMarker') {
-        addMarker(message.latitude, message.longitude);
-        Alert.alert(
-          'Место добавлено',
-          'Нажми повторно, чтобы изменить название или удалить место.'
-        );
+        try {
+          await addMarker(message.latitude, message.longitude);
+          Alert.alert(
+            'Место добавлено',
+            'Нажми на метку, чтобы изменить название или удалить место.'
+          );
+        } catch {
+          Alert.alert('Ошибка', 'Не удалось сохранить место. Попробуй ещё раз.');
+        }
       }
 
       if (message.type === 'openMarker') {
-        const marker = markers.find(
-          (item) => item.id === message.id
-        );
+        const marker = markers.find((item) => item.id === message.id);
 
         if (marker) {
           router.push({
             pathname: '/marker/[id]',
             params: {
-              id: marker.id,
+              id: String(marker.id),
               latitude: String(marker.latitude),
               longitude: String(marker.longitude),
             },
